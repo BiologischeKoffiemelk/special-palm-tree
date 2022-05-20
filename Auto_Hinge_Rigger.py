@@ -1,4 +1,6 @@
 from maya import cmds
+import math
+
 
 cmds.select(clear=True)
 
@@ -46,6 +48,8 @@ def CreateHinge(directionString, limbStringList):
     cmds.ikHandle(sj=f"{directionString}{hingeRoot}_IK_JNT", endEffector=f"{directionString}{hingeEnd}_IK_JNT", priority=2, weight=5, name=f"{directionString}{limb}_IK_HDL") #Create IKhandle
     cmds.rename("effector1", f"{directionString}{limb}_EFF")
 
+    cmds.delete("locator1", "locator2", "locator3")
+
     #Create locators as controls ARMS
     cmds.spaceLocator(name = f"{directionString}{hingeRoot}_FK_CTRL")
     cmds.spaceLocator(name = f"{directionString}{hinge}_FK_CTRL")
@@ -76,49 +80,64 @@ def CreateHinge(directionString, limbStringList):
         cmds.delete(f"{directionString}{i}_Offset_parentConstraint1")
         cmds.parentConstraint(f"{directionString}{i}_CTRL",f"{directionString}{i}_JNT")
 
-    #PV creator
-    pts = []
+#PV creator
+    def getVector(p2, p1):
+        return [p2[0]-p1[0], p2[1]-p1[1], p2[2]-p1[2]]
 
-    cmds.select("locator1", "locator2", "locator3")
+    def getLength(v):
+        return math.sqrt(v[0]**2.0 + v[1]**2.0 + v[2]**2.0)
 
-    cmds.select( cmds.listRelatives( type = 'locator', fullPath = True, allDescendents = True ) )
-    cmds.select( cmds.listRelatives( parent = True, fullPath = True ) )
-    sel = cmds.ls (type = 'transform', orderedSelection = True )
+    # All points.
+    p1 = cmds.xform(f"{directionString}{hingeRoot}_JNT", q = True, ws = True, t = True)
+    p2 = cmds.xform(f"{directionString}{hinge}_JNT", q = True, ws = True, t = True)
+    p3 = cmds.xform(f"{directionString}{hingeEnd}_JNT", q = True, ws = True, t = True)
 
-    for loc in sel:
-        coords = cmds.xform (loc, query=True, worldSpace=True, pivots=True)[0:3]
-        pts.append(coords)
+    # All vectors.
+    p12 = getVector(p2, p1)
+    p23 = getVector(p3, p2)
+    p13 = getVector(p3, p1)
 
-    cmds.polyCreateFacet(name = "plane", p = pts) #Create triangular plane
+    # All lengths.
+    p12_m = getLength(p12)
+    p23_m = getLength(p23)
+    p13_m = getLength(p13)
 
-    shoulder = pts[0]
-    wrist = pts[-1]
-    deltaX = wrist[0] - shoulder[0]
-    deltaY = wrist[1] - shoulder[1]
-    deltaZ = wrist[2] - shoulder[2]
+    # Semi Perimeter and Heron's formula for altitude
+    sp = (p12_m + p23_m + p13_m) / 2.0
+    altitude = (2 * (math.sqrt((sp * (sp - p12_m) * (sp - p23_m) * (sp - p13_m))))) / p13_m
+    angle_radians = math.acos((p12[0] * p13[0] + p12[1] * p13[1] + p12[2] * p13[2]) / (p12_m * p13_m))
+    angle_degrees = angle_radians * (180 / math.pi)
 
-    half = (deltaX*0.5, deltaY*0.5, deltaZ*0.5)
-    mid = (shoulder[0]+half[0],shoulder[1]+half[1],shoulder[2]+half[2])
+    # Distance from p1 to perpendicular height: simple because this is a right triangle.
+    missing_side = p12_m * math.cos(angle_radians)
 
-    cmds.spaceLocator(absolute=True, n="middle", p=(mid))
+    # Normalize since we will multiply by the p13 vector.
+    normalized = missing_side / p13_m
+    delta = [x * normalized for x in p13]
 
-    cmds.xform('plane.vtx[0]', query=True, t=True, ws=True)
-    cmds.xform('plane', rotatePivot=mid, scalePivot=mid)
+    # Add to our original p1 point.
+    position = [p1[0] + delta[0], p1[1] + delta[1], p1[2] + delta[2]]
+    cmds.spaceLocator(name= "point", p = position)
 
-    cmds.scale( 4, 4, 4, 'plane', absolute=True )#Scale the plane
+    # Set PV position directly using the new point to find vector.
+    projectionVector = getVector(p2, position)#[p2[0] - position[0], p2[1] - position[1], p2[2] - position[2]]
+    projectionVector_m = getLength(projectionVector)#math.sqrt(projectionVector[0]**2.0 + projectionVector[1]**2.0 + projectionVector[2]**2.0)
+    distance = 5.0 / projectionVector_m
+    projectedVector = [x * distance for x in projectionVector]
+    pv = [p2[0] + projectedVector[0], p2[1] + projectedVector[1], p2[2] + projectedVector[2]]
+    cmds.spaceLocator(name =f"{directionString}{limb}_PV",p = pv)
 
-    cmds.spaceLocator(name = f"{directionString}{limb}_PV") #Make PV
-    cmds.group(f"{directionString}{limb}_PV" , n=f"{directionString}{limb}_PV_Offset") #Group PV
-    position1 = cmds.xform('plane.vtx[1]', query=True, t=True, ws=True)
-    cmds.xform(f"{directionString}{limb}_PV_Offset", t=position1) #Move PV to location
+    #Set pivot to right location
+    obj=f"{directionString}{limb}_PV"
+    center=cmds.objectCenter(obj, gl = True)
+    print(center)
+    cmds.xform(obj, pivots = center)
 
     cmds.poleVectorConstraint( f"{directionString}{limb}_PV", f"{directionString}{limb}_IK_HDL")
 
-    cmds.delete("plane") #Delete plane
-    cmds.delete("locator1", "locator2", "locator3") #Delete locators
-    cmds.delete("middle")
+    cmds.delete("point")
 
-    #Networks
+#Networks
     cmds.createNode("network", name=f"{directionString}FK_{limb}_Network")
     cmds.addAttr(f"{directionString}FK_{limb}_Network", ln=f"{directionString}FK_{hingeRoot}", dataType="string")
     cmds.addAttr(f"{directionString}FK_{limb}_Network", ln=f"{directionString}FK_{hinge}", dataType="string")
@@ -137,7 +156,7 @@ def CreateHinge(directionString, limbStringList):
     cmds.connectAttr(f"{directionString}{hingeEnd}_IK_CTRL.message" , f"{directionString}IK_{limb}_Network.{directionString}IK_{hingeEnd}")
     cmds.connectAttr(f"{directionString}{limb}_PV.message" , f"{directionString}IK_{limb}_Network.{directionString}{limb}_PV")
 
-    #Blend
+#Blend
     cmds.createNode("blendColors", name=f"{directionString}{hingeRoot}_JNTBC")
     cmds.createNode("blendColors", name=f"{directionString}{hinge}_JNTBC")
     cmds.createNode("blendColors", name=f"{directionString}{hingeEnd}_JNTBC")
@@ -194,3 +213,4 @@ cmds.separator(horizontal=False, style="none", h=10)
 cmds.button(label='Create', command=lambda x:action_button(rightRB, armRB), align='left')
 
 cmds.showWindow()
+
